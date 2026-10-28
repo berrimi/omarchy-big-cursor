@@ -14,6 +14,36 @@ BarWidget {
     ? cursorService.sensitivity : Number(setting("sensitivity", 2.5))
   property bool popupOpen: false
 
+  // The shake threshold has three named levels; any other value is custom.
+  readonly property var sensitivityLevels: [
+    { name: "Light", value: 2.0 },
+    { name: "Medium", value: 2.5 },
+    { name: "Hard", value: 3.5 }
+  ]
+  readonly property int sensitivityLevel: root.levelFor(root.sensitivity)
+  property bool customSensitivity: root.sensitivityLevel < 0
+  onSensitivityLevelChanged: if (root.sensitivityLevel < 0) root.customSensitivity = true
+
+  function levelFor(value) {
+    for (var i = 0; i < root.sensitivityLevels.length; i++)
+      if (Math.abs(root.sensitivityLevels[i].value - value) < 0.001) return i
+    return -1
+  }
+
+  function nearestLevel(value) {
+    var nearest = 0
+    for (var i = 1; i < root.sensitivityLevels.length; i++) {
+      if (Math.abs(root.sensitivityLevels[i].value - value)
+          < Math.abs(root.sensitivityLevels[nearest].value - value)) nearest = i
+    }
+    return nearest
+  }
+
+  function setSensitivityLevel(index) {
+    root.customSensitivity = false
+    root.persist("sensitivity", root.sensitivityLevels[index].value)
+  }
+
   // Write one setting to this widget's shell.json entry. The service picks it
   // up from the file, but is updated first so the change is live on release.
   function persist(key, value) {
@@ -45,7 +75,7 @@ BarWidget {
     repeat: false
     onTriggered: {
       if (root.popupOpen && !button.tooltipHovered && !popup.containsMouse && !maxSlider.dragging
-          && !sensitivitySlider.dragging)
+          && !sensitivitySlider.dragging && !customSlider.dragging)
         root.popupOpen = false
     }
   }
@@ -149,19 +179,66 @@ BarWidget {
 
       SettingRow {
         label: "SHAKE NEEDED"
-        valueText: root.sensitivity <= 2 ? "Light" : root.sensitivity <= 3.5 ? "Medium" : "Hard"
+        valueText: root.customSensitivity
+          ? "Custom · " + root.sensitivity.toFixed(1)
+          : root.sensitivityLevels[Math.max(0, root.sensitivityLevel)].name
 
         PanelSlider {
           id: sensitivitySlider
           width: parent.width
           bar: root.bar
-          minimum: 1.5
-          maximum: 6
-          step: 0.5
-          value: root.sensitivity
-          onMoved: if (root.cursorService) root.cursorService.sensitivity = value
-          onReleased: root.persist("sensitivity", value)
+          minimum: 0
+          maximum: root.sensitivityLevels.length - 1
+          step: 1
+          integer: true
+          tickCount: root.sensitivityLevels.length
+          enabled: !root.customSensitivity
+          opacity: root.customSensitivity ? 0.4 : 1
+          value: root.nearestLevel(root.sensitivity)
+          onReleased: root.setSensitivityLevel(Math.round(value))
         }
+      }
+
+      Item {
+        width: parent.width
+        height: customSwitch.implicitHeight
+
+        Text {
+          anchors.verticalCenter: parent.verticalCenter
+          text: "Custom value"
+          color: root.bar.foreground
+          opacity: 0.7
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.caption
+        }
+
+        ToggleSwitch {
+          id: customSwitch
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          checked: root.customSensitivity
+          foreground: root.bar.foreground
+          // Turning custom off snaps back to the closest named level.
+          onToggled: {
+            if (root.customSensitivity) root.setSensitivityLevel(root.nearestLevel(root.sensitivity))
+            else root.customSensitivity = true
+          }
+        }
+      }
+
+      // Lower values trigger on a lighter shake. Past about 4 a shake has to
+      // be faster than most hands can manage.
+      PanelSlider {
+        id: customSlider
+        visible: root.customSensitivity
+        width: parent.width
+        bar: root.bar
+        minimum: 1.5
+        maximum: 5
+        step: 0.1
+        value: root.sensitivity
+        onMoved: if (root.cursorService) root.cursorService.sensitivity = Math.round(value * 10) / 10
+        onReleased: root.persist("sensitivity", Math.round(value * 10) / 10)
       }
 
       Button {

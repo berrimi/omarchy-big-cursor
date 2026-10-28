@@ -27,7 +27,10 @@ Click the cursor icon in the bar to set:
 
 - **Max size:** how big the cursor can get, from 32 to 256 px. A preview plays
   when you release the slider.
-- **Shake needed:** how hard you have to shake before it grows.
+- **Shake needed:** how hard you have to shake before it grows. Choose
+  **Light** (2.0), **Medium** (2.5) or **Hard** (3.5), or turn on **Custom
+  value** for a slider from 1.5 to 5.0. Above about 4, a shake has to be
+  faster than most hands can manage.
 
 Right-click the icon to preview the maximum size.
 
