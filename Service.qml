@@ -5,13 +5,14 @@ import Quickshell.Wayland
 
 // Shake-to-find cursor. cursor-bridge.py streams pointer positions from
 // Hyprland; this service detects a shake from how much path the pointer covers
-// inside a small area. While the shake lasts it hides the real cursor and
-// draws an arrow that grows on an overlay, then hands back to the real one.
+// inside a small area. While the shake lasts the cursor grows, then shrinks
+// back.
 //
-// Resizing the real cursor with `setcursor` does not redraw the cursor that is
-// already showing (it only changes when the app under it sets a new shape),
-// and every step reloads the whole cursor theme, so the overlay does the
-// scaling instead.
+// Hyprland cannot say which cursor shape it is showing, so the only shape this
+// can reproduce exactly is the arrow: the bridge exports it from the cursor
+// theme Hyprland loaded, and the overlay scales that bitmap instead of drawing
+// its own arrow. Themes with no Xcursor file (hyprcursor-only) keep the drawn
+// arrow as a fallback.
 Item {
   id: root
 
@@ -48,6 +49,14 @@ Item {
   // drawn by the cursor themes Omarchy ships with until the first reply lands.
   property color cursorFill: "#000000"
   property color cursorStroke: "#ffffff"
+
+  // The arrow image from the cursor theme Hyprland is using, exported by the
+  // bridge, plus its hotspot and pixel width. Empty when the theme has no
+  // Xcursor file (hyprcursor-only), which leaves the drawn arrow.
+  property string arrowSource: ""
+  property int arrowHotspotX: 0
+  property int arrowHotspotY: 0
+  property real arrowSize: 0
 
   readonly property bool enlarged: root.level > 0 && root.cursorReady
   readonly property real currentSize: root.baseSize
@@ -199,6 +208,13 @@ Item {
 
   function handleLine(line) {
     var parts = String(line || "").trim().split(/\s+/)
+    if (parts.length === 5 && parts[0] === "arrow") {
+      root.arrowSource = "file://" + parts[1]
+      root.arrowHotspotX = Number(parts[2])
+      root.arrowHotspotY = Number(parts[3])
+      root.arrowSize = Number(parts[4])
+      return
+    }
     if (parts.length === 3 && parts[0] === "colors") {
       root.cursorFill = parts[1]
       root.cursorStroke = parts[2]
@@ -248,7 +264,24 @@ Item {
         && root.cursorY >= modelData.y
         && root.cursorY < modelData.y + modelData.height
 
+      // The theme's arrow at its own pixel size, scaled from its hotspot so the
+      // tip stays on the pointer. Smooth filtering hides the resampling when the
+      // theme's largest image is bigger than the cursor currently is.
+      Image {
+        visible: root.arrowSource !== ""
+        source: root.arrowSource
+        cache: false
+        smooth: true
+        transformOrigin: Item.TopLeft
+        readonly property real arrowScale: root.arrowSize > 0
+          ? root.currentSize / root.arrowSize : 1
+        scale: arrowScale
+        x: root.cursorX - overlay.modelData.x - root.arrowHotspotX * arrowScale
+        y: root.cursorY - overlay.modelData.y - root.arrowHotspotY * arrowScale
+      }
+
       CursorArrow {
+        visible: root.arrowSource === ""
         x: root.cursorX - overlay.modelData.x
         y: root.cursorY - overlay.modelData.y
         size: root.currentSize
@@ -276,7 +309,7 @@ Item {
     }
     onRunningChanged: if (running) {
       root.refreshCursorColors()
-      if (root.enlarged) root.setCursorHidden(true)
+      root.setCursorHidden(root.enlarged)
     }
   }
 

@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """I/O bridge between the Big Cursor service and Hyprland's request socket.
 
-stdout: "<x> <y>" each time the pointer moves, and "colors <fill> <stroke>"
-        after a "colors" request.
+stdout: "<x> <y>" each time the pointer moves, and "colors <fill> <stroke>" plus
+        "arrow <path> <hotspotX> <hotspotY> <width>" after a "colors" request.
+        "arrow" is printed once at startup too.
 stdin:  "cursor hide" / "cursor show" lines, which hide or show the real
         compositor cursor while the service draws the enlarged one, and
-        "colors", which samples the current cursor theme's arrow colors.
+        "colors", which samples the current cursor theme's arrow colors and
+        exports its arrow image.
 
 Hyprland closes the request socket after every reply, which makes a QML
 Socket log a warning per sample; one long-lived process keeps that quiet.
@@ -19,7 +21,9 @@ import socket
 import struct
 import subprocess
 import sys
+import tempfile
 import time
+import zlib
 
 FAST_INTERVAL = 0.008  # while the pointer is moving
 IDLE_INTERVAL = 0.05  # after it has been still for IDLE_AFTER seconds
@@ -33,6 +37,8 @@ COMMANDS = {
 COLOR_COMMAND = "colors"
 IMAGE_TYPE = 0xFFFD0002  # Xcursor image chunk
 ARROW_NAMES = ("left_ptr", "default", "top_left_arrow", "arrow")
+ARROW_DIR = os.path.join(
+    os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir(), "big-cursor")
 
 
 def socket_path():
@@ -117,27 +123,40 @@ def arrow_images(path):
         kind, _, position = struct.unpack_from("<3I", data, header + index * 12)
         if kind != IMAGE_TYPE:
             continue
-        header_size, _, _, _, width, height, _, _, _ = struct.unpack_from(
-            "<9I", data, position)
+        (header_size, _, _, _, width, height,
+         hotspot_x, hotspot_y, _) = struct.unpack_from("<9I", data, position)
         pixels = struct.unpack_from("<%dI" % (width * height), data, position + header_size)
-        images.append((width * height, pixels))
+        images.append({
+            "width": width,
+            "height": height,
+            "hotspotX": hotspot_x,
+            "hotspotY": hotspot_y,
+            "pixels": pixels,
+        })
     return images
+
+
+# The arrow is the only cursor both Hyprland and this plugin can name. Hyprland
+# picks one of the theme's images by size; the largest is exported so the
+# service can scale it up without turning blurry.
+def theme_arrow():
+    path = cursor_file(theme_name())
+    if not path:
+        return None
+    try:
+        return arrow_images(path)
+    except (OSError, struct.error):
+        return None
 
 
 # The two most common opaque colors of the arrow are its fill and its outline,
 # whatever the theme's palette. Hyprcursor-only themes ship no Xcursor images,
 # so they fall back to the arrow's built-in black and white.
 def cursor_colors():
-    path = cursor_file(theme_name())
-    if not path:
-        return None
-    try:
-        images = arrow_images(path)
-    except (OSError, struct.error):
-        return None
+    images = theme_arrow()
     if not images:
         return None
-    _, pixels = max(images)
+    pixels = max(images, key=lambda image: image["width"] * image["height"])["pixels"]
     counts = collections.Counter(
         (pixel >> 16 & 255, pixel >> 8 & 255, pixel & 255)
         for pixel in pixels if pixel >> 24 > 200)
@@ -148,6 +167,61 @@ def cursor_colors():
     return "#%02x%02x%02x" % fill, "#%02x%02x%02x" % stroke
 
 
+def write_png(width, height, rgba):
+    def chunk(tag, payload):
+        return (struct.pack(">I", len(payload)) + tag + payload
+                + struct.pack(">I", zlib.crc32(tag + payload) & 0xFFFFFFFF))
+
+    raw = b"".join(b"\x00" + bytes(rgba[row * width * 4:(row + 1) * width * 4])
+                   for row in range(height))
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw, 6))
+            + chunk(b"IEND", b""))
+
+
+# Writes the theme's arrow next to the socket and reports where its hotspot is
+# and how wide its image is, so the service can scale it as a whole instead of
+# guessing from the tip. A new file name per export makes the service reload it
+# when the cursor theme changes; QML caches images by URL.
+def arrow_sprite():
+    images = theme_arrow()
+    if not images:
+        return None
+    image = max(images, key=lambda image: image["width"] * image["height"])
+    width, height = image["width"], image["height"]
+    rgba = bytearray(width * height * 4)
+    for index, pixel in enumerate(image["pixels"]):
+        offset = index * 4
+        rgba[offset] = pixel >> 16 & 255
+        rgba[offset + 1] = pixel >> 8 & 255
+        rgba[offset + 2] = pixel & 255
+        rgba[offset + 3] = pixel >> 24
+    try:
+        os.makedirs(ARROW_DIR, exist_ok=True)
+        target = os.path.join(ARROW_DIR, f"arrow-{time.monotonic_ns()}.png")
+        with open(target, "wb") as file:
+            file.write(write_png(width, height, rgba))
+    except OSError:
+        return None
+    for name in os.listdir(ARROW_DIR):
+        if name.startswith("arrow-") and name != os.path.basename(target):
+            try:
+                os.unlink(os.path.join(ARROW_DIR, name))
+            except OSError:
+                pass
+    return target, image["hotspotX"], image["hotspotY"], width
+
+
+def report_theme():
+    arrow = arrow_sprite()
+    if arrow:
+        print("arrow", *arrow, flush=True)
+    colors = cursor_colors()
+    if colors:
+        print(COLOR_COMMAND, *colors, flush=True)
+
+
 def main():
     path = socket_path()
     stdin = sys.stdin.fileno()
@@ -156,6 +230,8 @@ def main():
     last_position = None
     last_move = 0.0
     next_poll = 0.0
+
+    report_theme()
 
     try:
         while True:
@@ -174,9 +250,7 @@ def main():
                             if command in COMMANDS or command == COLOR_COMMAND]
                 for command in commands:
                     if command == COLOR_COMMAND:
-                        colors = cursor_colors()
-                        if colors:
-                            print(COLOR_COMMAND, *colors, flush=True)
+                        report_theme()
                     else:
                         try:
                             request(path, COMMANDS[command])
