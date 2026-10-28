@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.gabrielforster.big-cursor",
+  "name": "Big Cursor",
+  "version": "0.1.0",
+  "author": "gabrielforster",
+  "description": "Shake the mouse to find the cursor: it grows while you shake, like macOS.",
+  "kinds": ["service"],
+  "entryPoints": {
+    "service": "Service.qml"
+  }
+}
