@@ -5,21 +5,46 @@ locate" to Hyprland. Wiggle the mouse and the cursor grows. The longer you
 shake, the bigger it gets, up to the size you configure. Stop shaking and it
 shrinks back.
 
+![Big Cursor](preview.png)
+
 ## Install
 
 ```bash
 omarchy plugin add https://github.com/gabrielforster/omarchy-big-cursor.git --enable
 ```
 
+The cursor icon appears on the right side of the bar. Move it with
+`omarchy bar move io.github.gabrielforster.big-cursor --section <left|center|right>`.
+
 Or from a local checkout:
 
 ```bash
-ln -s ~/Work/personal/omarchy-big-cursor ~/.config/omarchy/plugins/io.github.gabrielforster.big-cursor
+ln -s ~/path/to/omarchy-big-cursor ~/.config/omarchy/plugins/io.github.gabrielforster.big-cursor
 omarchy-shell shell rescanPlugins
 omarchy plugin enable io.github.gabrielforster.big-cursor
 ```
 
-Requires `python3`, which Omarchy already ships as a dependency of `uwsm`.
+A symlinked checkout doesn't hot-reload. Run `omarchy restart shell` after
+editing it.
+
+## Remove
+
+```bash
+omarchy plugin remove io.github.gabrielforster.big-cursor
+```
+
+To keep it installed but turn it off, use
+`omarchy plugin disable io.github.gabrielforster.big-cursor`. Either way the
+real cursor is restored and the settings entry is dropped from
+`~/.config/omarchy/shell.json`. The plugin writes nothing else to disk.
+
+## Requirements
+
+- Omarchy with the Quickshell-based `omarchy-shell` and Hyprland's Lua config,
+  since it uses `hyprctl eval` to hide the real cursor while enlarged. Tested
+  on Hyprland 0.56.
+- `python3` with only the standard library. Omarchy already ships it as a
+  dependency of `uwsm`.
 
 ## Configure
 
