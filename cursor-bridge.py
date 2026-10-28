@@ -2,12 +2,12 @@
 """I/O bridge between the Big Cursor service and Hyprland's request socket.
 
 stdout: "<x> <y>" each time the pointer moves.
-stdin:  "setcursor <theme> <size>" lines, forwarded to Hyprland. When several
-        arrive at once only the newest is sent, so a slow compositor never
-        falls behind the animation.
+stdin:  "cursor hide" / "cursor show" lines, which hide or show the real
+        compositor cursor while the service draws the enlarged one.
 
 Hyprland closes the request socket after every reply, which makes a QML
 Socket log a warning per sample; one long-lived process keeps that quiet.
+If the shell exits while the cursor is hidden, the bridge shows it again.
 """
 
 import os
@@ -16,9 +16,14 @@ import socket
 import sys
 import time
 
-FAST_INTERVAL = 0.016  # while the pointer is moving
+FAST_INTERVAL = 0.008  # while the pointer is moving
 IDLE_INTERVAL = 0.05  # after it has been still for IDLE_AFTER seconds
 IDLE_AFTER = 1.0
+
+COMMANDS = {
+    "cursor hide": "/eval hl.config({ cursor = { invisible = true } })",
+    "cursor show": "/eval hl.config({ cursor = { invisible = false } })",
+}
 
 
 def socket_path():
@@ -42,43 +47,50 @@ def main():
     path = socket_path()
     stdin = sys.stdin.fileno()
     pending = b""
+    hidden = False
     last_position = None
     last_move = 0.0
     next_poll = 0.0
 
-    while True:
-        now = time.monotonic()
-        interval = FAST_INTERVAL if now - last_move < IDLE_AFTER else IDLE_INTERVAL
-        ready, _, _ = select.select([stdin], [], [], max(0.0, next_poll - now))
+    try:
+        while True:
+            now = time.monotonic()
+            interval = FAST_INTERVAL if now - last_move < IDLE_AFTER else IDLE_INTERVAL
+            ready, _, _ = select.select([stdin], [], [], max(0.0, next_poll - now))
 
-        if ready:
-            data = os.read(stdin, 4096)
-            if not data:
-                return  # The shell went away.
-            pending += data
-            *lines, pending = pending.split(b"\n")
-            commands = [
-                line.decode(errors="replace").strip()
-                for line in lines
-                if line.startswith(b"setcursor ")
-            ]
-            if commands:
-                try:
-                    request(path, "/" + commands[-1])
-                except OSError:
-                    pass
-            continue
+            if ready:
+                data = os.read(stdin, 4096)
+                if not data:
+                    return  # The shell went away.
+                pending += data
+                *lines, pending = pending.split(b"\n")
+                commands = [line.decode(errors="replace").strip() for line in lines]
+                commands = [command for command in commands if command in COMMANDS]
+                # Only the newest state matters when several arrive at once.
+                if commands:
+                    try:
+                        request(path, COMMANDS[commands[-1]])
+                        hidden = commands[-1] == "cursor hide"
+                    except OSError:
+                        pass
+                continue
 
-        next_poll = now + interval
-        try:
-            x, y = (int(value) for value in request(path, "/cursorpos").split(","))
-        except (OSError, ValueError):
-            continue
+            next_poll = now + interval
+            try:
+                x, y = (int(value) for value in request(path, "/cursorpos").split(","))
+            except (OSError, ValueError):
+                continue
 
-        if (x, y) != last_position:
-            last_position = (x, y)
-            last_move = now
-            print(x, y, flush=True)
+            if (x, y) != last_position:
+                last_position = (x, y)
+                last_move = now
+                print(x, y, flush=True)
+    finally:
+        if hidden:
+            try:
+                request(path, COMMANDS["cursor show"])
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":

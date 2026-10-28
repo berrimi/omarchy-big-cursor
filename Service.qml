@@ -1,10 +1,17 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import Quickshell.Wayland
 
 // Shake-to-find cursor. cursor-bridge.py streams pointer positions from
 // Hyprland; this service detects a shake from how much path the pointer covers
-// inside a small area, and grows the real compositor cursor while it lasts.
+// inside a small area. While the shake lasts it hides the real cursor and
+// draws an arrow that grows on an overlay, then hands back to the real one.
+//
+// Resizing the real cursor with `setcursor` does not redraw the cursor that is
+// already showing (it only changes when the app under it sets a new shape),
+// and every step reloads the whole cursor theme, so the overlay does the
+// scaling instead.
 Item {
   id: root
 
@@ -13,15 +20,14 @@ Item {
   readonly property string bridgePath: decodeURIComponent(
     String(Qt.resolvedUrl("cursor-bridge.py")).replace(/^file:\/\//, ""))
 
-  // Settings. Defaults below; overridden by this plugin's entry in the
-  // `plugins` array of ~/.config/omarchy/shell.json (hot-reloaded).
+  // Settings. Defaults below; overridden by this plugin's entry in
+  // ~/.config/omarchy/shell.json (hot-reloaded), which the bar widget edits.
   property int maxSize: 96
   property real sensitivity: 2.5
   property int growMs: 300
   property int holdMs: 500
   property int shrinkMs: 350
   property int baseSize: root.environmentSize()
-  property string theme: root.environmentTheme()
 
   // Shake detection works on the last few hundred milliseconds of movement.
   readonly property int shakeWindowMs: 500
@@ -29,22 +35,23 @@ Item {
   readonly property int minimumReversals: 2
 
   property var samples: []
+  property real cursorX: 0
+  property real cursorY: 0
+  property bool cursorReady: false
   property real level: 0
   property bool animating: false
   property double lastShakeMs: 0
+  property double previewUntilMs: 0
   property double lastTickMs: 0
+  property bool cursorHidden: false
 
-  // Starting at baseSize means the plugin never touches the cursor until the
-  // first shake.
-  property int sentSize: root.baseSize
+  readonly property bool enlarged: root.level > 0 && root.cursorReady
+  readonly property real currentSize: root.baseSize
+    + (root.maxSize - root.baseSize) * (1 - Math.pow(1 - root.level, 3))
 
   function environmentSize() {
     var size = Number(Quickshell.env("HYPRCURSOR_SIZE") || Quickshell.env("XCURSOR_SIZE"))
     return isFinite(size) && size > 0 ? Math.round(size) : 24
-  }
-
-  function environmentTheme() {
-    return String(Quickshell.env("HYPRCURSOR_THEME") || Quickshell.env("XCURSOR_THEME") || "default")
   }
 
   function numberSetting(entry, key, fallback, minimum, maximum) {
@@ -53,34 +60,45 @@ Item {
     return Math.max(minimum, Math.min(maximum, value))
   }
 
-  function applySettings(raw) {
-    var entry = {}
-    try {
-      var config = JSON.parse(String(raw || "{}"))
-      var plugins = Array.isArray(config.plugins) ? config.plugins : []
-      for (var i = 0; i < plugins.length; i++) {
-        if (plugins[i] && plugins[i].id === root.pluginId) entry = plugins[i]
+  // The entry lives in the bar layout when the bar widget is placed, and in
+  // `plugins` otherwise.
+  function findEntry(config) {
+    var lists = [Array.isArray(config.plugins) ? config.plugins : []]
+    var layout = config.bar && config.bar.layout ? config.bar.layout : {}
+    for (var section in layout) {
+      if (Array.isArray(layout[section])) lists.push(layout[section])
+    }
+
+    for (var i = 0; i < lists.length; i++) {
+      for (var j = 0; j < lists[i].length; j++) {
+        if (lists[i][j] && lists[i][j].id === root.pluginId) return lists[i][j]
       }
+    }
+    return {}
+  }
+
+  function applySettings(raw) {
+    var entry
+    try {
+      entry = root.findEntry(JSON.parse(String(raw || "{}")))
     } catch (error) {
       // Keep the current settings while shell.json is mid-edit.
       return
     }
 
-    var nextBase = Math.round(root.numberSetting(entry, "baseSize", root.environmentSize(), 8, 256))
-    var nextTheme = typeof entry.theme === "string" && /^[^\s]+$/.test(entry.theme)
-      ? entry.theme : root.environmentTheme()
-
-    // Changing the base or theme while at rest would leave the old cursor
-    // applied, so restore against the new values right away.
-    var restore = nextBase !== root.baseSize || nextTheme !== root.theme
-    root.baseSize = nextBase
-    root.theme = nextTheme
+    root.baseSize = Math.round(root.numberSetting(entry, "baseSize", root.environmentSize(), 8, 256))
     root.maxSize = Math.round(root.numberSetting(entry, "maxSize", 96, root.baseSize, 256))
     root.sensitivity = root.numberSetting(entry, "sensitivity", 2.5, 1.5, 10)
     root.growMs = Math.round(root.numberSetting(entry, "growMs", 300, 16, 5000))
     root.holdMs = Math.round(root.numberSetting(entry, "holdMs", 500, 0, 10000))
     root.shrinkMs = Math.round(root.numberSetting(entry, "shrinkMs", 350, 16, 5000))
-    if (restore) root.setSize(root.baseSize, true)
+  }
+
+  // Grow to the current maximum and back, so the size can be judged while a
+  // slider is moved.
+  function preview() {
+    root.previewUntilMs = Date.now() + root.growMs
+    root.animating = true
   }
 
   function addSample(line) {
@@ -88,6 +106,10 @@ Item {
     var x = Number(parts[0])
     var y = Number(parts[1])
     if (parts.length !== 2 || !isFinite(x) || !isFinite(y)) return
+
+    root.cursorX = x
+    root.cursorY = y
+    root.cursorReady = true
 
     var next = root.samples
     next.push({ x: x, y: y, t: Date.now() })
@@ -146,33 +168,69 @@ Item {
     root.lastTickMs = now
 
     root.pruneSamples(now)
-    if (root.isShaking()) root.lastShakeMs = now
+    if (root.isShaking() || now < root.previewUntilMs) root.lastShakeMs = now
 
     // Grow for as long as the shake continues, so a longer shake gets a
     // bigger cursor, then hold briefly before shrinking back.
     if (now - root.lastShakeMs < 60) root.level = Math.min(1, root.level + dt / root.growMs)
     else if (now - root.lastShakeMs > root.holdMs) root.level = Math.max(0, root.level - dt / root.shrinkMs)
 
-    var eased = 1 - Math.pow(1 - root.level, 3)
-    root.setSize(Math.round(root.baseSize + (root.maxSize - root.baseSize) * eased), false)
-
-    if (root.level === 0 && root.samples.length === 0) {
+    if (root.level === 0 && root.samples.length === 0 && now >= root.previewUntilMs) {
       root.animating = false
       root.lastTickMs = 0
     }
   }
 
-  function setSize(size, force) {
-    if (!force && size === root.sentSize) return
-    root.sentSize = size
-    if (bridge.running) bridge.write("setcursor " + root.theme + " " + size + "\n")
+  function setCursorHidden(hidden) {
+    if (hidden === root.cursorHidden) return
+    root.cursorHidden = hidden
+    if (bridge.running) bridge.write(hidden ? "cursor hide\n" : "cursor show\n")
   }
 
+  onEnlargedChanged: root.setCursorHidden(root.enlarged)
+
   Timer {
-    interval: 16
+    interval: 8
     repeat: true
     running: root.animating
     onTriggered: root.tick()
+  }
+
+  // Mapped only while enlarged, so an idle overlay never sits above
+  // fullscreen apps.
+  Variants {
+    model: Quickshell.screens
+
+    PanelWindow {
+      id: overlay
+      required property var modelData
+      screen: modelData
+      visible: root.enlarged && cursorOnScreen
+      color: "transparent"
+      anchors {
+        top: true
+        bottom: true
+        left: true
+        right: true
+      }
+
+      WlrLayershell.namespace: root.pluginId
+      WlrLayershell.layer: WlrLayer.Overlay
+      WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
+      exclusionMode: ExclusionMode.Ignore
+      mask: Region {}
+
+      readonly property bool cursorOnScreen: root.cursorX >= modelData.x
+        && root.cursorX < modelData.x + modelData.width
+        && root.cursorY >= modelData.y
+        && root.cursorY < modelData.y + modelData.height
+
+      CursorArrow {
+        x: root.cursorX - overlay.modelData.x
+        y: root.cursorY - overlay.modelData.y
+        size: root.currentSize
+      }
+    }
   }
 
   Process {
@@ -185,8 +243,13 @@ Item {
       onRead: line => root.addSample(line)
     }
 
-    // Hyprland restarts or a crash in the bridge should not end the plugin.
-    onExited: bridgeRestart.restart()
+    // The bridge shows the cursor again when it exits, so a restarted bridge
+    // starts from a visible cursor.
+    onExited: {
+      root.cursorHidden = false
+      bridgeRestart.restart()
+    }
+    onRunningChanged: if (running && root.enlarged) root.setCursorHidden(true)
   }
 
   Timer {
@@ -205,7 +268,7 @@ Item {
   }
 
   Component.onDestruction: {
-    if (root.sentSize !== root.baseSize)
-      Quickshell.execDetached(["hyprctl", "setcursor", root.theme, String(root.baseSize)])
+    if (root.cursorHidden)
+      Quickshell.execDetached(["hyprctl", "eval", "hl.config({ cursor = { invisible = false } })"])
   }
 }

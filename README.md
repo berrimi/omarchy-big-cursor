@@ -5,9 +5,6 @@ locate" to Hyprland. Wiggle the mouse and the cursor grows. The longer you
 shake, the bigger it gets, up to the size you configure. Stop shaking and it
 shrinks back.
 
-It resizes the real compositor cursor (`hyprctl setcursor`), so the cursor
-keeps its normal shape and works over every app.
-
 ## Install
 
 ```bash
@@ -26,45 +23,47 @@ Requires `python3`, which Omarchy already ships as a dependency of `uwsm`.
 
 ## Configure
 
-Settings go on the plugin's entry in the `plugins` array of
-`~/.config/omarchy/shell.json`. Changes apply as soon as you save, with no
-restart needed.
+Click the cursor icon in the bar to set:
+
+- **Max size:** how big the cursor can get, from 32 to 256 px. A preview plays
+  when you release the slider.
+- **Shake needed:** how hard you have to shake before it grows.
+
+Right-click the icon to preview the maximum size.
+
+The same settings live on the plugin's entry in
+`~/.config/omarchy/shell.json` and apply as soon as you save:
 
 ```json
-"plugins": [
-  {
-    "id": "io.github.gabrielforster.big-cursor",
-    "maxSize": 128
-  }
-]
+{ "id": "io.github.gabrielforster.big-cursor", "maxSize": 128, "sensitivity": 2.5 }
 ```
 
-| Key           | Default                        | Meaning                                                           |
-|---------------|--------------------------------|-------------------------------------------------------------------|
-| `maxSize`     | `96`                           | Largest cursor size in px (up to 256)                             |
-| `sensitivity` | `2.5`                          | How shaky a movement must be. Higher values need a harder shake    |
-| `growMs`      | `300`                          | Shaking time needed to reach `maxSize`                            |
-| `holdMs`      | `500`                          | How long the cursor stays big after you stop                      |
-| `shrinkMs`    | `350`                          | Time to shrink back from `maxSize`                                |
-| `baseSize`    | `$HYPRCURSOR_SIZE` or `24`     | Normal cursor size to return to                                   |
-| `theme`       | `$HYPRCURSOR_THEME` or `default` | Cursor theme passed to `setcursor`                              |
-
-Cursor themes look best at sizes they ship natively. Adwaita includes 24, 32,
-48, 64 and 96, and Hyprland scales sizes in between.
+| Key           | Default                    | Meaning                                                          |
+|---------------|----------------------------|------------------------------------------------------------------|
+| `maxSize`     | `96`                       | Largest cursor size in px (up to 256)                            |
+| `sensitivity` | `2.5`                      | How shaky a movement must be. Higher values need a harder shake  |
+| `growMs`      | `300`                      | Shaking time needed to reach `maxSize`                           |
+| `holdMs`      | `500`                      | How long the cursor stays big after you stop                     |
+| `shrinkMs`    | `350`                      | Time to shrink back from `maxSize`                               |
+| `baseSize`    | `$HYPRCURSOR_SIZE` or `24` | Size the enlarged arrow starts from                              |
 
 ## How it works
 
 - `cursor-bridge.py` is one long-lived process. It polls `cursorpos` on
-  Hyprland's request socket (60 Hz while the pointer moves, 20 Hz when it is
-  still) and prints positions. It also forwards `setcursor` commands from the
-  service.
+  Hyprland's request socket (125 Hz while the pointer moves, 20 Hz when it is
+  still) and prints positions. It also hides and shows the real cursor when the
+  service asks.
 - `Service.qml` keeps the last 500 ms of movement. It counts that movement as a
   shake when the pointer covers at least `sensitivity` times the size of the
   area it stays inside and changes direction at least twice. A straight sweep
   or a single there-and-back flick doesn't count.
+- While enlarged, the real cursor is hidden and a vector arrow is drawn on an
+  overlay that is mapped only for that moment. The overlay scales smoothly at
+  any size. Hyprland's `setcursor` can't do this: it reloads the whole theme
+  on every step and doesn't redraw the cursor that's already showing.
 - While the shake lasts, a 0–1 level rises over `growMs`. After `holdMs`
-  without shaking, it falls over `shrinkMs`. The cursor size follows that level
+  without shaking, it falls over `shrinkMs`. The arrow size follows that level
   with an ease-out curve.
 
-If the plugin is disabled or reloaded while the cursor is enlarged, it is
-restored to `baseSize`.
+The real cursor comes back if the plugin is disabled or reloaded, or if the
+shell exits while the cursor is enlarged.
