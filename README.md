@@ -89,6 +89,9 @@ The same settings live on the plugin's entry in
   overlay that is mapped only for that moment. The overlay scales smoothly at
   any size. Hyprland's `setcursor` can't do this: it reloads the whole theme
   on every step and doesn't redraw the cursor that's already showing.
+- The arrow takes its fill and outline from the current cursor theme: the
+  bridge samples the two most common colors of the theme's `left_ptr` image.
+  Themes that only ship hyprcursor images keep the default black and white.
 - While the shake lasts, a 0–1 level rises over `growMs`. After `holdMs`
   without shaking, it falls over `shrinkMs`. The arrow size follows that level
   with an ease-out curve.

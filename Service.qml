@@ -44,6 +44,10 @@ Item {
   property double previewUntilMs: 0
   property double lastTickMs: 0
   property bool cursorHidden: false
+  // Sampled from the current cursor theme by the bridge; these match the arrow
+  // drawn by the cursor themes Omarchy ships with until the first reply lands.
+  property color cursorFill: "#000000"
+  property color cursorStroke: "#ffffff"
 
   readonly property bool enlarged: root.level > 0 && root.cursorReady
   readonly property real currentSize: root.baseSize
@@ -187,7 +191,26 @@ Item {
     if (bridge.running) bridge.write(hidden ? "cursor hide\n" : "cursor show\n")
   }
 
-  onEnlargedChanged: root.setCursorHidden(root.enlarged)
+  // The theme can change at runtime, so ask again when a shake starts; the
+  // startup request only fills in the colors for the first shake.
+  function refreshCursorColors() {
+    if (bridge.running) bridge.write("colors\n")
+  }
+
+  function handleLine(line) {
+    var parts = String(line || "").trim().split(/\s+/)
+    if (parts.length === 3 && parts[0] === "colors") {
+      root.cursorFill = parts[1]
+      root.cursorStroke = parts[2]
+      return
+    }
+    root.addSample(line)
+  }
+
+  onEnlargedChanged: {
+    root.setCursorHidden(root.enlarged)
+    if (root.enlarged) root.refreshCursorColors()
+  }
 
   Timer {
     interval: 8
@@ -229,6 +252,8 @@ Item {
         x: root.cursorX - overlay.modelData.x
         y: root.cursorY - overlay.modelData.y
         size: root.currentSize
+        fillColor: root.cursorFill
+        strokeColor: root.cursorStroke
       }
     }
   }
@@ -240,7 +265,7 @@ Item {
     stdinEnabled: true
 
     stdout: SplitParser {
-      onRead: line => root.addSample(line)
+      onRead: line => root.handleLine(line)
     }
 
     // The bridge shows the cursor again when it exits, so a restarted bridge
@@ -249,7 +274,10 @@ Item {
       root.cursorHidden = false
       bridgeRestart.restart()
     }
-    onRunningChanged: if (running && root.enlarged) root.setCursorHidden(true)
+    onRunningChanged: if (running) {
+      root.refreshCursorColors()
+      if (root.enlarged) root.setCursorHidden(true)
+    }
   }
 
   Timer {
