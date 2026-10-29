@@ -45,13 +45,9 @@ Item {
   property double previewUntilMs: 0
   property double lastTickMs: 0
   property bool cursorHidden: false
-  // Sampled from the current cursor theme by the bridge; these match the arrow
-  // drawn by the cursor themes Omarchy ships with until the first reply lands.
-  property color cursorFill: "#000000"
-  property color cursorStroke: "#ffffff"
 
   // The arrow image from the cursor theme Hyprland is using, exported by the
-  // bridge, plus its hotspot and pixel width. Empty when the theme has no
+  // bridge, plus its hotspot and nominal size. Empty when the theme has no
   // Xcursor file (hyprcursor-only), which leaves the drawn arrow.
   property string arrowSource: ""
   property int arrowHotspotX: 0
@@ -201,8 +197,8 @@ Item {
   }
 
   // The theme can change at runtime, so ask again when a shake starts; the
-  // startup request only fills in the colors for the first shake.
-  function refreshCursorColors() {
+  // startup request only fills in the arrow for the first shake.
+  function refreshCursorTheme() {
     if (bridge.running) bridge.write("colors\n")
   }
 
@@ -215,17 +211,12 @@ Item {
       root.arrowSize = Number(parts[4])
       return
     }
-    if (parts.length === 3 && parts[0] === "colors") {
-      root.cursorFill = parts[1]
-      root.cursorStroke = parts[2]
-      return
-    }
     root.addSample(line)
   }
 
   onEnlargedChanged: {
     root.setCursorHidden(root.enlarged)
-    if (root.enlarged) root.refreshCursorColors()
+    if (root.enlarged) root.refreshCursorTheme()
   }
 
   Timer {
@@ -285,8 +276,6 @@ Item {
         x: root.cursorX - overlay.modelData.x
         y: root.cursorY - overlay.modelData.y
         size: root.currentSize
-        fillColor: root.cursorFill
-        strokeColor: root.cursorStroke
       }
     }
   }
@@ -308,7 +297,7 @@ Item {
       bridgeRestart.restart()
     }
     onRunningChanged: if (running) {
-      root.refreshCursorColors()
+      root.refreshCursorTheme()
       root.setCursorHidden(root.enlarged)
     }
   }

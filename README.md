@@ -90,15 +90,15 @@ The same settings live on the plugin's entry in
   for that moment draws the arrow. The arrow is not drawn by the plugin: it is
   the largest `left_ptr` image exported from the cursor theme Hyprland loaded,
   placed by that image's own hotspot. It looks exactly like the real cursor,
-  just bigger, and stays sharp because the largest size in the theme is used.
+  just bigger, and stays sharp up to the largest size in the theme (96 px in
+  Adwaita and Yaru); above that it is scaled up and softens.
 - The overlay grows that bitmap smoothly at any size. Hyprland's `setcursor`
   can't do this: it reloads the whole theme on every step and doesn't redraw
   the cursor that's already showing.
 - Only the arrow is reproduced. Over a text field or a window border the cursor
   is an I-beam or a resize handle, and the enlarged one is still the arrow.
 - Themes that only ship hyprcursor images have no Xcursor file to export, so
-  they fall back to a drawn arrow. Its fill and outline are sampled from the
-  theme when possible, otherwise black and white.
+  they fall back to a drawn black arrow with a white outline.
 - While the shake lasts, a 0–1 level rises over `growMs`. After `holdMs`
   without shaking, it falls over `shrinkMs`. The arrow size follows that level
   with an ease-out curve.

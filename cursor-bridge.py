@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
 """I/O bridge between the Big Cursor service and Hyprland's request socket.
 
-stdout: "<x> <y>" each time the pointer moves, and "colors <fill> <stroke>" plus
-        "arrow <path> <hotspotX> <hotspotY> <width>" after a "colors" request.
+stdout: "<x> <y>" each time the pointer moves, and
+        "arrow <path> <hotspotX> <hotspotY> <size>" after a "colors" request.
         "arrow" is printed once at startup too.
 stdin:  "cursor hide" / "cursor show" lines, which hide or show the real
         compositor cursor while the service draws the enlarged one, and
-        "colors", which samples the current cursor theme's arrow colors and
-        exports its arrow image.
+        "colors", which exports the current cursor theme's arrow image.
 
 Hyprland closes the request socket after every reply, which makes a QML
 Socket log a warning per sample; one long-lived process keeps that quiet.
 If the shell exits while the cursor is hidden, the bridge shows it again.
 """
 
-import collections
 import os
 import select
 import socket
@@ -34,7 +32,7 @@ COMMANDS = {
     "cursor show": "/eval hl.config({ cursor = { invisible = false } })",
 }
 
-COLOR_COMMAND = "colors"
+THEME_COMMAND = "colors"
 IMAGE_TYPE = 0xFFFD0002  # Xcursor image chunk
 ARROW_NAMES = ("left_ptr", "default", "top_left_arrow", "arrow")
 ARROW_DIR = os.path.join(
@@ -58,30 +56,43 @@ def request(path, command):
     return b"".join(chunks).decode(errors="replace")
 
 
-# The cursor theme name Hyprland uses comes from the session env; the desktop
-# setting covers themes applied with `hyprctl setcursor` (as Omarchy's cursor
-# theming plugins do). Hyprland's own current theme cannot be queried.
+# The cursor theme name Hyprland uses comes from the desktop setting when one
+# has been applied, which covers themes set with `hyprctl setcursor` (as
+# Omarchy's cursor theming plugins do) and a setting changed after the shell
+# started. The session environment only covers the theme a fresh session boots
+# with, so it is the fallback. `dconf read` is preferred over `gsettings get`
+# because gsettings reports the default theme even when nothing is set.
+def desktop_theme():
+    commands = (
+        ["dconf", "read", "/org/gnome/desktop/interface/cursor-theme"],
+        ["gsettings", "get", "org.gnome.desktop.interface", "cursor-theme"],
+    )
+    for command in commands:
+        try:
+            completed = subprocess.run(command, capture_output=True, text=True, timeout=2)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        return completed.stdout.strip().strip("'")
+    return ""
+
+
+def theme_name():
+    name = desktop_theme()
+    if name:
+        return name
+    for variable in ("HYPRCURSOR_THEME", "XCURSOR_THEME"):
+        value = os.environ.get(variable)
+        if value:
+            return value
+    return "default"
+
+
 def icon_dirs():
     home = os.path.expanduser("~")
     data_home = os.environ.get("XDG_DATA_HOME") or os.path.join(home, ".local/share")
     data_dirs = os.environ.get("XDG_DATA_DIRS") or "/usr/local/share:/usr/share"
     dirs = [os.path.join(data_home, "icons"), os.path.join(home, ".icons")]
     return dirs + [os.path.join(base, "icons") for base in data_dirs.split(":") if base]
-
-
-def theme_name():
-    for variable in ("HYPRCURSOR_THEME", "XCURSOR_THEME"):
-        value = os.environ.get(variable)
-        if value:
-            return value
-    try:
-        completed = subprocess.run(
-            ["gsettings", "get", "org.gnome.desktop.interface", "cursor-theme"],
-            capture_output=True, text=True, timeout=2)
-        name = completed.stdout.strip().strip("'")
-    except (OSError, subprocess.SubprocessError):
-        name = ""
-    return name or "default"
 
 
 def inherited_themes(name):
@@ -120,13 +131,14 @@ def arrow_images(path):
         return []
     images = []
     for index in range(count):
-        kind, _, position = struct.unpack_from("<3I", data, header + index * 12)
+        kind, nominal, position = struct.unpack_from("<3I", data, header + index * 12)
         if kind != IMAGE_TYPE:
             continue
         (header_size, _, _, _, width, height,
          hotspot_x, hotspot_y, _) = struct.unpack_from("<9I", data, position)
         pixels = struct.unpack_from("<%dI" % (width * height), data, position + header_size)
         images.append({
+            "nominal": nominal,
             "width": width,
             "height": height,
             "hotspotX": hotspot_x,
@@ -149,24 +161,6 @@ def theme_arrow():
         return None
 
 
-# The two most common opaque colors of the arrow are its fill and its outline,
-# whatever the theme's palette. Hyprcursor-only themes ship no Xcursor images,
-# so they fall back to the arrow's built-in black and white.
-def cursor_colors():
-    images = theme_arrow()
-    if not images:
-        return None
-    pixels = max(images, key=lambda image: image["width"] * image["height"])["pixels"]
-    counts = collections.Counter(
-        (pixel >> 16 & 255, pixel >> 8 & 255, pixel & 255)
-        for pixel in pixels if pixel >> 24 > 200)
-    if not counts:
-        return None
-    colors = [color for color, _ in counts.most_common(2)]
-    fill, stroke = colors[0], colors[-1]
-    return "#%02x%02x%02x" % fill, "#%02x%02x%02x" % stroke
-
-
 def write_png(width, height, rgba):
     def chunk(tag, payload):
         return (struct.pack(">I", len(payload)) + tag + payload
@@ -181,9 +175,10 @@ def write_png(width, height, rgba):
 
 
 # Writes the theme's arrow next to the socket and reports where its hotspot is
-# and how wide its image is, so the service can scale it as a whole instead of
-# guessing from the tip. A new file name per export makes the service reload it
-# when the cursor theme changes; QML caches images by URL.
+# and its nominal size, so the service can scale it as a whole instead of
+# guessing from the tip. The file name comes from a hash of the PNG, so an
+# unchanged theme keeps the same URL (QML caches images by URL) and a real
+# change gets a new one.
 def arrow_sprite():
     images = theme_arrow()
     if not images:
@@ -192,16 +187,23 @@ def arrow_sprite():
     width, height = image["width"], image["height"]
     rgba = bytearray(width * height * 4)
     for index, pixel in enumerate(image["pixels"]):
+        alpha = pixel >> 24
+        if alpha == 0:
+            continue
         offset = index * 4
-        rgba[offset] = pixel >> 16 & 255
-        rgba[offset + 1] = pixel >> 8 & 255
-        rgba[offset + 2] = pixel & 255
-        rgba[offset + 3] = pixel >> 24
+        # Xcursor stores premultiplied ARGB and PNG alpha is straight, so the
+        # color channels have to be divided by alpha again.
+        rgba[offset] = min(255, (pixel >> 16 & 255) * 255 // alpha)
+        rgba[offset + 1] = min(255, (pixel >> 8 & 255) * 255 // alpha)
+        rgba[offset + 2] = min(255, (pixel & 255) * 255 // alpha)
+        rgba[offset + 3] = alpha
+    payload = write_png(width, height, rgba)
     try:
-        os.makedirs(ARROW_DIR, exist_ok=True)
-        target = os.path.join(ARROW_DIR, f"arrow-{time.monotonic_ns()}.png")
-        with open(target, "wb") as file:
-            file.write(write_png(width, height, rgba))
+        target = os.path.join(ARROW_DIR, "arrow-%08x.png" % (zlib.crc32(payload) & 0xFFFFFFFF))
+        if not os.path.exists(target):
+            os.makedirs(ARROW_DIR, exist_ok=True)
+            with open(target, "wb") as file:
+                file.write(payload)
     except OSError:
         return None
     for name in os.listdir(ARROW_DIR):
@@ -210,16 +212,24 @@ def arrow_sprite():
                 os.unlink(os.path.join(ARROW_DIR, name))
             except OSError:
                 pass
-    return target, image["hotspotX"], image["hotspotY"], width
+    return target, image["hotspotX"], image["hotspotY"], image["nominal"]
 
 
 def report_theme():
     arrow = arrow_sprite()
     if arrow:
         print("arrow", *arrow, flush=True)
-    colors = cursor_colors()
-    if colors:
-        print(COLOR_COMMAND, *colors, flush=True)
+
+
+# The export is only useful while the bridge runs, so it is left behind no
+# longer than the overlay that reads it.
+def remove_exports():
+    try:
+        for name in os.listdir(ARROW_DIR):
+            if name.startswith("arrow-"):
+                os.unlink(os.path.join(ARROW_DIR, name))
+    except OSError:
+        pass
 
 
 def main():
@@ -247,9 +257,9 @@ def main():
                 *lines, pending = pending.split(b"\n")
                 commands = [line.decode(errors="replace").strip() for line in lines]
                 commands = [command for command in commands
-                            if command in COMMANDS or command == COLOR_COMMAND]
+                            if command in COMMANDS or command == THEME_COMMAND]
                 for command in commands:
-                    if command == COLOR_COMMAND:
+                    if command == THEME_COMMAND:
                         report_theme()
                     else:
                         try:
@@ -275,6 +285,7 @@ def main():
                 request(path, COMMANDS["cursor show"])
             except OSError:
                 pass
+        remove_exports()
 
 
 if __name__ == "__main__":
